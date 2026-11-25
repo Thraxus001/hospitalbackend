@@ -10,6 +10,7 @@ from .database import Base, engine
 from .routers import admin, appointments, auth, doctor, doctors, patients, payments
 from .routers.referrals import admin_router as referral_admin_router, patient_router as referral_patient_router
 from .services.expiry import expiry_loop
+from .services.notifications import notify_loop
 
 log = logging.getLogger(__name__)
 
@@ -17,9 +18,13 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)  # use Alembic migrations once the schema stabilises
-    task = asyncio.create_task(expiry_loop())
+    tasks = [
+        asyncio.create_task(expiry_loop()),
+        asyncio.create_task(notify_loop()),
+    ]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="Outsourced Doctor Appointments API", version="0.1.0", lifespan=lifespan)

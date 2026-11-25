@@ -11,6 +11,7 @@ from ..database import get_db
 from ..deps import current_user, require_admin
 from ..models import ReferralCode, User
 from ..schemas import ReferralCodeIn, ReferralCodeOut, ReferralVerifyIn
+from ..services.notifications import notify_referral_issued
 
 router = APIRouter(tags=["referrals"])
 
@@ -88,6 +89,11 @@ def issue_referral_code(
     out = ReferralCodeOut.model_validate(ref)
     out.patient_name = ref.patient.full_name
     out.doctor_name = ref.doctor.full_name
+
+    # Notify patient via email and SMS
+    notify_referral_issued(db, ref.patient, ref.doctor.full_name, ref.code)
+    db.commit()
+
     return out
 
 

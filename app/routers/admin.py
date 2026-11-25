@@ -18,6 +18,7 @@ from ..schemas import (
     DepartmentOut,
     DoctorIn,
     DoctorOut,
+    DoctorAccountIn,
     HospitalSettingsIn,
     HospitalSettingsOut,
     PriorityBookIn,
@@ -51,10 +52,74 @@ def list_doctors(db: Session = Depends(get_db), current_user=Depends(require_adm
 
 @router.post("/doctors", response_model=DoctorOut, status_code=201)
 def add_doctor(body: DoctorIn, db: Session = Depends(get_db)):
-    d = Doctor(**body.model_dump())
+    doc_data = body.model_dump()
+    login_phone = doc_data.pop("login_phone", None)
+    login_email = doc_data.pop("login_email", None)
+    login_password = doc_data.pop("login_password", None)
+
+    d = Doctor(**doc_data)
     db.add(d)
     db.commit()
+    db.refresh(d)
+
+    if login_phone and login_password:
+        from ..security import hash_password
+        clean_phone = login_phone.strip()
+        user = db.query(User).filter((User.phone == clean_phone) | (User.full_name == d.full_name)).first()
+        if user:
+            user.role = "doctor"
+            user.phone = clean_phone
+            user.email = login_email.strip() if login_email else None
+            user.hashed_password = hash_password(login_password)
+        else:
+            user = User(
+                full_name=d.full_name,
+                phone=clean_phone,
+                email=login_email.strip() if login_email else None,
+                hashed_password=hash_password(login_password),
+                role="doctor",
+            )
+            db.add(user)
+        db.commit()
+
     return to_out(d)
+
+
+@router.post("/doctors/{doctor_id}/account", status_code=201)
+def create_doctor_account(
+    doctor_id: int,
+    body: DoctorAccountIn,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(require_admin),
+):
+    d = db.get(Doctor, doctor_id)
+    if not d:
+        raise HTTPException(404, "Doctor not found")
+
+    from ..security import hash_password
+    clean_phone = body.phone.strip()
+    clean_email = body.email.strip() if body.email and body.email.strip() else None
+
+    user = db.query(User).filter((User.phone == clean_phone) | (User.full_name == d.full_name)).first()
+    if user:
+        user.full_name = d.full_name
+        user.phone = clean_phone
+        user.email = clean_email
+        user.hashed_password = hash_password(body.password)
+        user.role = "doctor"
+    else:
+        user = User(
+            full_name=d.full_name,
+            phone=clean_phone,
+            email=clean_email,
+            hashed_password=hash_password(body.password),
+            role="doctor",
+        )
+        db.add(user)
+
+    audit(db, current_admin, "doctor.account_created", f"Login created for {d.full_name} ({clean_phone})")
+    db.commit()
+    return {"ok": True, "user_id": user.id}
 
 
 @router.post("/doctors/{doctor_id}/schedule", status_code=201)
@@ -123,6 +188,7 @@ def list_payments(status: str | None = None, db: Session = Depends(get_db)):
             status=payment.status,
             provider_ref=payment.provider_ref,
             created_at=payment.created_at,
+            appointment_at=appointment.start_at,
         )
         for payment, appointment, patient, doctor in rows
     ]
@@ -187,8 +253,8 @@ def retry_notification(
     notification = db.get(Notification, notification_id)
     if not notification:
         raise HTTPException(404, "Notification not found")
-    if notification.status != "failed" or notification.channel not in ("email", "sms"):
-        raise HTTPException(409, "Only failed email or SMS notifications can be retried")
+    if notification.status not in ("failed", "dry_run") or notification.channel not in ("email", "sms"):
+        raise HTTPException(409, "Only failed or dry-run email or SMS notifications can be retried")
     notification.status = "pending"
     notification.attempts = 0
     notification.error = None
@@ -276,6 +342,11 @@ def summary(days: int = 30, db: Session = Depends(get_db)):
         db.query(Appointment.status, func.count()).filter(Appointment.created_at >= since).group_by(Appointment.status).all()
     )
     attended, missed = counts.get("completed", 0), counts.get("no_show", 0)
+
+    # Waiting = pending_payment (held, not yet paid) + confirmed (paid, awaiting visit)
+    waiting = counts.get("pending_payment", 0) + counts.get("confirmed", 0)
+    total_appointments = sum(counts.values())
+
     per_doctor = (
         db.query(Doctor.full_name, func.count(Appointment.id))
         .join(Appointment, Appointment.doctor_id == Doctor.id)
@@ -293,6 +364,10 @@ def summary(days: int = 30, db: Session = Depends(get_db)):
             db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(Payment.status == "refund_due").scalar()
         ),
         "appointments_by_status": counts,
+        "total_appointments": total_appointments,
+        "waiting": waiting,
+        "no_shows": missed,
+        "counselled": attended,
         "turnout_rate": round(attended / (attended + missed), 3) if attended + missed else None,
         "bookings_per_doctor": {n: c for n, c in per_doctor},
         "daily_collected": [

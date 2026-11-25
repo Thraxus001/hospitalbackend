@@ -1,4 +1,4 @@
-"""Email + SMS + dashboard notifications.
+"""Email (via Resend) + SMS (via Africa's Talking) + dashboard notifications.
 
 Design: business code calls `notify_*` which only INSERTS outbox rows (same DB transaction as the
 booking/payment change). A background worker (`notify_loop`) creates due reminders and delivers
@@ -7,9 +7,7 @@ with several API workers running.
 """
 import asyncio
 import logging
-import smtplib
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 
 import httpx
 from sqlalchemy.exc import IntegrityError
@@ -47,7 +45,8 @@ def enqueue(db: Session, user: User | None, kind: str, subject: str, body: str, 
 
 
 def _when(dt: datetime) -> str:
-    return dt.astimezone(TZ).strftime("%a %d %b, %H:%M")
+    """Full date + time, e.g. 'Mon 24 Nov, 09:00'."""
+    return dt.astimezone(TZ).strftime("%a %d %b %Y, %H:%M")
 
 
 def _in(mins: float) -> str:
@@ -97,6 +96,20 @@ def notify_refunded(db: Session, p: Payment) -> None:
     a = p.appointment
     enqueue(db, a.patient, "refunded", "Refund sent",
             f"We have refunded KES {p.amount:,.0f} for appointment #{a.id}. Thank you.", f"refunded:{p.id}:p", a.id)
+
+
+def notify_referral_issued(db: Session, patient: User, doctor_name: str, code: str) -> None:
+    """Send referral code to patient via email and SMS."""
+    subject = "Your specialist referral code"
+    body = (
+        f"Hello {patient.full_name.split()[0]},\n\n"
+        f"You have been issued a referral code to see {doctor_name}.\n\n"
+        f"Your referral code is: {code}\n\n"
+        f"Please use this code when booking your appointment with {doctor_name}. "
+        f"Keep it safe — it is personal and can only be used once.\n\n"
+        f"If you did not expect this, please contact us immediately."
+    )
+    enqueue(db, patient, "referral_issued", subject, body, f"refcode:{code}:p")
 
 
 # ---------------------------------------------------------------- reminders
@@ -149,22 +162,25 @@ def schedule_reminders(db: Session, now: datetime | None = None) -> int:
 
 # ---------------------------------------------------------------- delivery
 def send_email(to: str, subject: str, body: str) -> str | None:
-    if not settings.smtp_host:
+    """Send email via Resend API (https://resend.com). Falls back to dry-run if no API key."""
+    if not settings.resend_api_key:
         log.info("[dry-run email] to=%s subject=%s\n%s", to, subject, body)
         return "dry-run"
-    msg = EmailMessage()
-    msg["From"], msg["To"], msg["Subject"] = settings.smtp_from, to, subject
-    msg.set_content(body)
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as s:
-        if settings.smtp_starttls:
-            s.starttls()
-        if settings.smtp_user:
-            s.login(settings.smtp_user, settings.smtp_password)
-        s.send_message(msg)
+    # Convert plain text to simple HTML
+    html_body = "<p>" + body.replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
+    r = httpx.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {settings.resend_api_key}", "Content-Type": "application/json"},
+        json={"from": settings.resend_from, "to": [to], "subject": subject, "text": body, "html": html_body},
+        timeout=20,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Resend error {r.status_code}: {r.text[:200]}")
     return None
 
 
 def send_sms(to: str, body: str) -> str | None:
+    """Send SMS via Africa's Talking API. Falls back to dry-run if no API key."""
     if not settings.at_api_key:
         log.info("[dry-run sms] to=%s: %s", to, body)
         return "dry-run"

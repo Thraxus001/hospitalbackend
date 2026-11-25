@@ -35,7 +35,7 @@ def current_doctor(
 ) -> Doctor:
     if user.role != "doctor":
         raise HTTPException(403, "Doctor only")
-    doctor = db.query(Doctor).filter(Doctor.full_name == user.full_name).first()
+    doctor = db.query(Doctor).filter(Doctor.full_name.ilike(user.full_name.strip())).first()
     if not doctor:
         raise HTTPException(404, "Doctor profile not found")
     return doctor

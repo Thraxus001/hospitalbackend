@@ -41,6 +41,16 @@ class Doctor(Base):
     active: Mapped[bool] = mapped_column(default=True)
     schedules: Mapped[list["DoctorSchedule"]] = relationship(back_populates="doctor", cascade="all, delete-orphan")
 
+    @property
+    def user(self) -> "User | None":
+        from sqlalchemy.orm import object_session
+        sess = object_session(self)
+        if sess is not None:
+            return sess.query(User).filter(User.full_name.ilike(self.full_name), User.role == "doctor").first()
+        from .database import SessionLocal
+        with SessionLocal() as db:
+            return db.query(User).filter(User.full_name.ilike(self.full_name), User.role == "doctor").first()
+
 
 class DoctorSchedule(Base):
     """A visiting window, e.g. every Tuesday 09:00-13:00 (local time)."""

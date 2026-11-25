@@ -46,6 +46,15 @@ class DoctorIn(BaseModel):
     slot_minutes: int = Field(20, ge=20, le=30)
     consultation_fee: Decimal = Field(gt=0)
     max_daily_appointments: int = Field(20, ge=1)
+    login_phone: str | None = None
+    login_email: str | None = None
+    login_password: str | None = None
+
+
+class DoctorAccountIn(BaseModel):
+    phone: str = Field(min_length=9)
+    email: str | None = None
+    password: str = Field(min_length=8)
 
 
 class DoctorOut(ORM):
@@ -136,6 +145,13 @@ class CardPayIn(BaseModel):
     bank_name: str | None = None
 
 
+class BankPayIn(BaseModel):
+    appointment_id: int
+    bank_name: str
+    account_number: str
+    account_holder: str = "Valued Patient"
+
+
 class PaymentOut(ORM):
     id: int
     method: str
@@ -203,6 +219,7 @@ class AdminPaymentOut(ORM):
     status: str
     provider_ref: str | None
     created_at: datetime
+    appointment_at: datetime | None = None  # appointment date/time for context
 
 
 class AdminNotificationOut(NotificationOut):

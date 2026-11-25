@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import current_user
 from ..models import Appointment, Payment, User
-from ..schemas import CardPayIn, InsurancePayIn, MpesaPayIn, PaymentOut
+from ..schemas import BankPayIn, CardPayIn, InsurancePayIn, MpesaPayIn, PaymentOut
 from ..services.mpesa import normalize_phone, stk_push
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -39,23 +39,38 @@ def pay_mpesa(body: MpesaPayIn, db: Session = Depends(get_db), user: User = Depe
     return pay
 
 
+def _record_paid(db: Session, appt: Appointment, method: str, provider_ref: str) -> Payment:
+    """Create a settled payment record and confirm the appointment."""
+    pay = Payment(
+        appointment_id=appt.id,
+        method=method,
+        amount=appt.amount_due,
+        status="paid",
+        provider_ref=provider_ref,
+    )
+    db.add(pay)
+    _settle(appt, pay)
+    db.commit()
+    return pay
+
+
 @router.post("/card", response_model=PaymentOut)
 def pay_card(body: CardPayIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     a = _pending_appt(db, body.appointment_id, user)
     clean_num = "".join(filter(str.isdigit, body.card_number))
     last4 = clean_num[-4:] if len(clean_num) >= 4 else "CARD"
     brand = body.bank_name or ("Visa" if clean_num.startswith("4") else "Mastercard" if clean_num.startswith("5") else "Card")
-    pay = Payment(
-        appointment_id=a.id,
-        method="card",
-        amount=a.amount_due,
-        status="paid",
-        provider_ref=f"{brand}:{last4}",
-    )
-    db.add(pay)
-    _settle(a, pay)
-    db.commit()
-    return pay
+    return _record_paid(db, a, "card", f"{brand}:{last4}")
+
+
+@router.post("/bank", response_model=PaymentOut)
+def pay_bank(body: BankPayIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Process direct bank account payment and confirm the appointment."""
+    a = _pending_appt(db, body.appointment_id, user)
+    clean_acct = "".join(filter(str.isdigit, body.account_number))
+    if not body.bank_name.strip() or len(clean_acct) < 4:
+        raise HTTPException(422, "Select a bank and enter a valid account number")
+    return _record_paid(db, a, "bank", f"{body.bank_name.strip()}:{clean_acct[-4:]}")
 
 
 @router.post("/mpesa/callback", include_in_schema=False)

@@ -20,19 +20,33 @@ def me(doc: Doctor = Depends(current_doctor)):
 
 
 @router.get("/appointments", response_model=list[AppointmentOut])
-def day_list(day: str | None = None, db: Session = Depends(get_db), doc: Doctor = Depends(current_doctor)):
-    d = datetime.strptime(day, "%Y-%m-%d").date() if day else datetime.now(TZ).date()
-    lo, hi = day_bounds(d)
-    return (
-        db.query(Appointment)
-        .filter(Appointment.doctor_id == doc.id, Appointment.start_at >= lo, Appointment.start_at < hi,
-                Appointment.status.in_(("confirmed", "completed", "no_show")))
-        .order_by(Appointment.start_at).all()
-    )
+def day_list(
+    day: str | None = None,
+    all_upcoming: bool = False,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    doc: Doctor = Depends(current_doctor),
+):
+    q = db.query(Appointment).filter(Appointment.doctor_id == doc.id)
+    if not all_upcoming and day:
+        d = datetime.strptime(day, "%Y-%m-%d").date()
+        lo, hi = day_bounds(d)
+        q = q.filter(Appointment.start_at >= lo, Appointment.start_at < hi)
+    elif not all_upcoming and not day:
+        today = datetime.now(TZ).date()
+        lo, hi = day_bounds(today)
+        q = q.filter(Appointment.start_at >= lo, Appointment.start_at < hi)
+
+    if status:
+        q = q.filter(Appointment.status == status)
+    else:
+        q = q.filter(Appointment.status.in_(("confirmed", "completed", "no_show", "pending_payment")))
+
+    return q.order_by(Appointment.start_at).all()
 
 
 @router.get("/upcoming", response_model=list[AppointmentOut])
-def upcoming(hours: int = 12, db: Session = Depends(get_db), doc: Doctor = Depends(current_doctor)):
+def upcoming(hours: int = 24, db: Session = Depends(get_db), doc: Doctor = Depends(current_doctor)):
     now = datetime.now(timezone.utc)
     return (
         db.query(Appointment)
@@ -46,10 +60,10 @@ def _mark(db: Session, doc: Doctor, user: User, appt_id: int, new: str) -> Appoi
     a = db.get(Appointment, appt_id)
     if not a or a.doctor_id != doc.id:
         raise HTTPException(404, "Appointment not found")
-    if a.status != "confirmed":
+    if a.status not in ("confirmed", "completed", "no_show"):
         raise HTTPException(409, f"Cannot mark a {a.status} appointment as {new}")
-    if a.start_at > datetime.now(timezone.utc):
-        raise HTTPException(409, "This appointment has not started yet")
+    if new == "no_show" and a.start_at > datetime.now(timezone.utc):
+        raise HTTPException(409, "Cannot mark as no-show before the appointment start time")
     a.status = new
     audit(db, user, f"appointment.{new}", f"#{a.id} by {doc.full_name}")
     db.commit()
